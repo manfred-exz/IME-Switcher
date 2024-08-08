@@ -14,6 +14,10 @@ Features:
 
 ## Release
 
+https://github.com/manfred-exz/IME-Switcher/releases/latest
+
+## Build
+
 ```
 python -m nuitka --standalone --windows-disable-console .\main.py
 ```
