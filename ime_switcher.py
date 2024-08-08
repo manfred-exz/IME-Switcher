@@ -137,7 +137,7 @@ async def on_temp_toggle_en_cn():
     on_toggle_en_cn()
     logger.info('Switching back in when key is released...')
     while True:
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(0.05)
         logger.info('checking...')
         if last_key_press_time and time.time() - last_key_press_time > 2.:
             break
@@ -181,37 +181,10 @@ class HotKeyTrigger:
                 on_switch_english()
             elif hotkey_id == 4:
                 on_switch_chinese()
-        elif msg == win32con.WM_USER + 1:
-            global last_key_press_time
-            last_key_press_time = time.time()
         return win32gui.DefWindowProc(hwnd, msg, wparam, lparam)
 
-    # ANY KEY
-    def low_level_handler(self, nCode, wParam, lParam):
-        if nCode >= 0:
-            if wParam == win32con.WM_KEYUP:
-                kb = ctypes.cast(lParam, POINTER(KBDLLHOOKSTRUCT)).contents
-                win32gui.PostMessage(self.hwnd, win32con.WM_USER + 1, kb.vkCode, 0)
-        return user32.CallNextHookEx(self.hook_id, nCode, wParam, lParam)
-
-    def install_hook(self):
-        CMPFUNC = CFUNCTYPE(c_int, c_int, c_int, POINTER(c_void_p))
-        self.hooked = CMPFUNC(self.low_level_handler)
-        self.hook_id = user32.SetWindowsHookExA(
-            win32con.WH_KEYBOARD_LL, self.hooked, None, 0
-        )
-        if not self.hook_id:
-            raise ctypes.WinError()
-
-    def uninstall_hook(self):
-        if self.hook_id:
-            user32.UnhookWindowsHookEx(self.hook_id)
-            self.hook_id = None
-
-    async def start(self):
+    async def listen_hotkey(self):
         self.hwnd = self.create_window()
-
-        self.install_hook()
 
         VK_LBRACKET = 0xDB
         VK_RBRACKET = 0xDD
@@ -243,14 +216,25 @@ class HotKeyTrigger:
         # # Unregister all hotkeys when done
         # for id in registered_hotkeys:
         #     self.unregister_hotkey(hwnd, id)
-        # self.uninstall_hook()
+
+    async def do_key_check(self):
+        while True:
+            for vk in range(256):
+                if win32api.GetAsyncKeyState(vk) & 0x0001:  # Key was pressed since last call
+                    global last_key_press_time
+                    last_key_press_time = time.time()
+                    logger.info('key pressed')
+                    break
+            await asyncio.sleep(0.1)
 
 
 if __name__ == '__main__':
     trigger = HotKeyTrigger()
     systray = SysTrayIcon("icon.ico", "IME Switcher",
-                          on_quit=lambda _:  os._exit(1))
+                          on_quit=lambda _: os._exit(1))
     systray.start()
-    asyncio.run(trigger.start())
-    systray.shutdown()
+    loop = asyncio.get_event_loop()
+    loop.create_task(trigger.do_key_check())
+    loop.create_task(trigger.listen_hotkey())
+    loop.run_forever()
     systray.shutdown()
