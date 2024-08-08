@@ -4,7 +4,7 @@ import logging
 import os
 import sys
 import time
-from ctypes import CFUNCTYPE, POINTER, c_int, c_void_p, Structure, wintypes
+from ctypes import Structure, wintypes
 
 import win32api
 import win32con
@@ -131,6 +131,7 @@ def on_switch_chinese():
 
 
 last_key_press_time: float = None
+short_toggle_start_time: float = None
 
 
 async def on_temp_toggle_en_cn():
@@ -140,6 +141,20 @@ async def on_temp_toggle_en_cn():
         await asyncio.sleep(0.05)
         logger.info('checking...')
         if last_key_press_time and time.time() - last_key_press_time > 2.:
+            break
+    on_toggle_en_cn()
+
+
+async def on_short_toggle_en_cn():
+    await asyncio.sleep(0.05)
+    global short_toggle_start_time
+    short_toggle_start_time: float = None
+    on_toggle_en_cn()
+    while True:
+        await asyncio.sleep(0.05)
+        logger.info('checking...')
+        # 0.3s time windows for user to input (then automatically switch back)
+        if short_toggle_start_time and time.time() - short_toggle_start_time > 0.3:
             break
     on_toggle_en_cn()
 
@@ -178,8 +193,10 @@ class HotKeyTrigger:
             elif hotkey_id == 2:
                 asyncio.create_task(on_temp_toggle_en_cn())
             elif hotkey_id == 3:
-                on_switch_english()
+                asyncio.create_task(on_short_toggle_en_cn())
             elif hotkey_id == 4:
+                on_switch_english()
+            elif hotkey_id == 5:
                 on_switch_chinese()
         return win32gui.DefWindowProc(hwnd, msg, wparam, lparam)
 
@@ -194,8 +211,9 @@ class HotKeyTrigger:
         hotkeys = [
             (1, win32con.MOD_CONTROL, VK_BACKSLASH),
             (2, win32con.MOD_CONTROL | win32con.MOD_SHIFT, VK_BACKSLASH),
-            # (3, win32con.MOD_CONTROL | win32con.MOD_ALT, VK_LBRACKET),
-            # (4, win32con.MOD_CONTROL | win32con.MOD_ALT, VK_RBRACKET),
+            (3, win32con.MOD_CONTROL | win32con.MOD_ALT, VK_BACKSLASH),
+            # (4, win32con.MOD_CONTROL | win32con.MOD_ALT, VK_LBRACKET),
+            # (5, win32con.MOD_CONTROL | win32con.MOD_ALT, VK_RBRACKET),
 
             # Add more hotkeys here
         ]
@@ -203,10 +221,10 @@ class HotKeyTrigger:
         registered_hotkeys = []
         for id, modifiers, vk in hotkeys:
             if self.register_hotkey(self.hwnd, id, modifiers, vk):
-                print(f"Global hotkey registered: ID {id}")
+                logger.info(f"Global hotkey registered: ID {id}")
                 registered_hotkeys.append(id)
             else:
-                print(f"Failed to register global hotkey: ID {id}")
+                logger.info(f"Failed to register global hotkey: ID {id}")
 
         # Message loop
         while True:
@@ -221,9 +239,11 @@ class HotKeyTrigger:
         while True:
             for vk in range(256):
                 if win32api.GetAsyncKeyState(vk) & 0x0001:  # Key was pressed since last call
-                    global last_key_press_time
-                    last_key_press_time = time.time()
                     logger.info('key pressed')
+                    global last_key_press_time, short_toggle_start_time
+                    last_key_press_time = time.time()
+                    if short_toggle_start_time is None:
+                        short_toggle_start_time = time.time()
                     break
             await asyncio.sleep(0.1)
 
