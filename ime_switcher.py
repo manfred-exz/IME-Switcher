@@ -2,9 +2,8 @@ import asyncio
 import ctypes
 import logging
 import os
-import sys
 import time
-from ctypes import Structure, wintypes
+from ctypes import wintypes
 
 import win32api
 import win32con
@@ -21,23 +20,6 @@ LANG_ID_ENGLISH = '0409'
 
 user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
 user32.GetWindowTextW.restype = ctypes.c_int
-
-
-class KBDLLHOOKSTRUCT(Structure):
-    _fields_ = [
-        ("vkCode", ctypes.wintypes.DWORD),
-        ("scanCode", ctypes.wintypes.DWORD),
-        ("flags", ctypes.wintypes.DWORD),
-        ("time", ctypes.wintypes.DWORD),
-        ("dwExtraInfo", ctypes.POINTER(ctypes.wintypes.ULONG)),
-    ]
-
-
-def get_executable_directory():
-    if getattr(sys, 'frozen', False):
-        return os.path.dirname(sys.executable)
-    else:
-        return os.path.dirname(os.path.abspath(__file__))
 
 
 def setup_logger():
@@ -89,6 +71,16 @@ def get_window_langid(hwnd):
     return langid
 
 
+def get_front_window():
+    hwnd = win32gui.GetForegroundWindow()
+    return win32gui.GetAncestor(hwnd, win32con.GA_ROOTOWNER)
+
+
+def get_front_window_langid():
+    hwnd = get_front_window()
+    return get_window_langid(hwnd)
+
+
 def set_input_language_for_window(hwnd, keyboard_layout_id: str):
     """
     Set the input language for the currently active window.
@@ -102,8 +94,7 @@ def set_input_language_for_window(hwnd, keyboard_layout_id: str):
 
 
 def on_toggle_en_cn():
-    hwnd = win32gui.GetForegroundWindow()
-    hwnd = win32gui.GetAncestor(hwnd, win32con.GA_ROOTOWNER)
+    hwnd = get_front_window()
     title = get_window_text(hwnd) or '[Unknown]'
     lang_id = get_window_langid(hwnd)
     if lang_id == LANG_ID_CHINESE:
@@ -115,46 +106,38 @@ def on_toggle_en_cn():
 
 
 def on_switch_english():
-    hwnd = win32gui.GetForegroundWindow()
-    hwnd = win32gui.GetAncestor(hwnd, win32con.GA_ROOTOWNER)
+    hwnd = get_front_window()
     title = get_window_text(hwnd) or '[Unknown]'
     set_input_language_for_window(hwnd, f'0000{LANG_ID_ENGLISH}')
     logger.info(f'{title}: switched to ENGLISH')
 
 
 def on_switch_chinese():
-    hwnd = win32gui.GetForegroundWindow()
-    hwnd = win32gui.GetAncestor(hwnd, win32con.GA_ROOTOWNER)
+    hwnd = get_front_window()
     title = get_window_text(hwnd) or '[Unknown]'
     set_input_language_for_window(hwnd, f'0000{LANG_ID_CHINESE}')
     logger.info(f'{title}: switched to CHINESE')
 
 
 last_key_press_time: float = None
-short_toggle_start_time: float = None
 
 
-async def on_temp_toggle_en_cn():
+async def on_temp_toggle_en_cn(key_press_interval: float):
+    # for Chinese, there's a time to select the Chinese character
+    if get_front_window_langid() == LANG_ID_ENGLISH:
+        key_press_interval = max(key_press_interval, 2)
+
+    await asyncio.sleep(0.1)
     on_toggle_en_cn()
-    logger.info('Switching back in when key is released...')
+
+    logger.info(f'Switching back in when key is inactive for {key_press_interval}...')
+
+    global last_key_press_time
+    last_key_press_time = None
     while True:
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0.1)
         logger.info('checking...')
-        if last_key_press_time and time.time() - last_key_press_time > 2.:
-            break
-    on_toggle_en_cn()
-
-
-async def on_short_toggle_en_cn():
-    await asyncio.sleep(0.05)
-    global short_toggle_start_time
-    short_toggle_start_time: float = None
-    on_toggle_en_cn()
-    while True:
-        await asyncio.sleep(0.05)
-        logger.info('checking...')
-        # 0.3s time windows for user to input (then automatically switch back)
-        if short_toggle_start_time and time.time() - short_toggle_start_time > 0.3:
+        if last_key_press_time and time.time() - last_key_press_time > key_press_interval:
             break
     on_toggle_en_cn()
 
@@ -191,9 +174,9 @@ class HotKeyTrigger:
             if hotkey_id == 1:
                 on_toggle_en_cn()
             elif hotkey_id == 2:
-                asyncio.create_task(on_temp_toggle_en_cn())
+                asyncio.create_task(on_temp_toggle_en_cn(key_press_interval=2))
             elif hotkey_id == 3:
-                asyncio.create_task(on_short_toggle_en_cn())
+                asyncio.create_task(on_temp_toggle_en_cn(key_press_interval=0.3))
             elif hotkey_id == 4:
                 on_switch_english()
             elif hotkey_id == 5:
@@ -240,12 +223,10 @@ class HotKeyTrigger:
             for vk in range(256):
                 if win32api.GetAsyncKeyState(vk) & 0x0001:  # Key was pressed since last call
                     logger.info('key pressed')
-                    global last_key_press_time, short_toggle_start_time
+                    global last_key_press_time
                     last_key_press_time = time.time()
-                    if short_toggle_start_time is None:
-                        short_toggle_start_time = time.time()
                     break
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.05)
 
 
 if __name__ == '__main__':
