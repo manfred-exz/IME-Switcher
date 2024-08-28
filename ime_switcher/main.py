@@ -1,5 +1,7 @@
 import asyncio
+import contextlib
 import ctypes
+import json
 import logging
 import os
 import time
@@ -11,12 +13,12 @@ import win32gui
 import win32process
 from infi.systray import SysTrayIcon
 
+from ime_switcher.shortcut import parse_shortcut
+
 IMC_GETOPENSTATUS = 0x0005
 IMC_SETOPENSTATUS = 0x0006
 user32 = ctypes.windll.user32
 imm32 = ctypes.WinDLL('imm32', use_last_error=True)
-LANG_ID_CHINESE = '0804'
-LANG_ID_ENGLISH = '0409'
 
 user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
 user32.GetWindowTextW.restype = ctypes.c_int
@@ -47,6 +49,32 @@ def setup_logger():
 
 
 logger = setup_logger()
+
+root_dir = os.path.abspath(os.path.dirname(__file__))
+config_path = os.path.join(root_dir, '../config.json')
+
+if os.path.exists(config_path):
+    with open(os.path.join(root_dir, '../config.json')) as f:
+        config = json.load(f)
+    logger.info(f'Loaded config from {config_path}')
+    logger.info(f'Config: {config}')
+else:
+    config = {
+        "temp_switch_interval": 2.0,
+        "instant_switch_interval": 0.6,
+        "secondary_keyboard_id": "00000804",
+        "hotkeys": {
+            "toggle": "Ctrl+\\",
+            "temp_toggle": "Ctrl+Shift+\\",
+            "instant_toggle": "Ctrl+Alt+\\"
+        }
+    }
+
+english_lang_id = '0409'
+english_keyboard_id = f'0000{english_lang_id}'
+secondary_keyboard_id = config['secondary_keyboard_id']
+assert len(secondary_keyboard_id) == 8
+secondary_lang_id = secondary_keyboard_id[4:8]
 
 
 def get_window_text(hwnd):
@@ -93,53 +121,69 @@ def set_input_language_for_window(hwnd, keyboard_layout_id: str):
     win32api.PostMessage(hwnd, win32con.WM_INPUTLANGCHANGEREQUEST, 0, locale_id)
 
 
-def on_toggle_en_cn():
+def on_toggle():
     hwnd = get_front_window()
     title = get_window_text(hwnd) or '[Unknown]'
     lang_id = get_window_langid(hwnd)
-    if lang_id == LANG_ID_CHINESE:
-        set_input_language_for_window(hwnd, f'0000{LANG_ID_ENGLISH}')
+    if lang_id == secondary_lang_id:
+        set_input_language_for_window(hwnd, english_keyboard_id)
         logger.info(f'{title}: toggled to ENGLISH')
     else:
-        set_input_language_for_window(hwnd, f'0000{LANG_ID_CHINESE}')
-        logger.info(f'{title}: toggled to CHINESE')
+        set_input_language_for_window(hwnd, secondary_keyboard_id)
+        logger.info(f'{title}: toggled to secondary keyboard')
 
 
 def on_switch_english():
     hwnd = get_front_window()
     title = get_window_text(hwnd) or '[Unknown]'
-    set_input_language_for_window(hwnd, f'0000{LANG_ID_ENGLISH}')
+    set_input_language_for_window(hwnd, english_keyboard_id)
     logger.info(f'{title}: switched to ENGLISH')
 
 
-def on_switch_chinese():
+def on_switch_secondary():
     hwnd = get_front_window()
     title = get_window_text(hwnd) or '[Unknown]'
-    set_input_language_for_window(hwnd, f'0000{LANG_ID_CHINESE}')
-    logger.info(f'{title}: switched to CHINESE')
+    set_input_language_for_window(hwnd, secondary_keyboard_id)
+    logger.info(f'{title}: switched to secondary keyboard')
 
 
 last_key_press_time: float = None
+is_during_temp_toggling = False
 
 
-async def on_temp_toggle_en_cn(key_press_interval: float):
-    # for Chinese, there's a time to select the Chinese character
-    if get_front_window_langid() == LANG_ID_ENGLISH:
-        key_press_interval = max(key_press_interval, 2)
+@contextlib.contextmanager
+def during_temp_toggling():
+    global is_during_temp_toggling
+    try:
+        is_during_temp_toggling = True
+        yield
+    finally:
+        is_during_temp_toggling = False
 
-    await asyncio.sleep(0.1)
-    on_toggle_en_cn()
 
-    logger.info(f'Switching back in when key is inactive for {key_press_interval}...')
+async def on_temp_toggle(key_press_interval: float):
+    if is_during_temp_toggling:
+        return
 
-    global last_key_press_time
-    last_key_press_time = None
-    while True:
-        await asyncio.sleep(0.1)
-        logger.info('checking...')
-        if last_key_press_time and time.time() - last_key_press_time > key_press_interval:
-            break
-    on_toggle_en_cn()
+    with during_temp_toggling():
+        # for Chinese, there's a time to select the Chinese character
+        is_switching_to_chinese = get_front_window_langid() == english_lang_id and secondary_lang_id == '0804'
+        if is_switching_to_chinese:
+            key_press_interval = max(key_press_interval, 2)
+
+        await asyncio.sleep(0.2)
+        on_toggle()
+
+        logger.info(f'Switching back in when key is inactive for {key_press_interval}...')
+
+        global last_key_press_time
+        last_key_press_time = None
+        while True:
+            await asyncio.sleep(0.1)
+            logger.info('checking...')
+            if last_key_press_time and time.time() - last_key_press_time > key_press_interval:
+                break
+        on_toggle()
 
 
 class HotKeyTrigger:
@@ -172,42 +216,44 @@ class HotKeyTrigger:
         if msg == win32con.WM_HOTKEY:
             hotkey_id = wparam
             if hotkey_id == 1:
-                on_toggle_en_cn()
+                on_toggle()
             elif hotkey_id == 2:
-                asyncio.create_task(on_temp_toggle_en_cn(key_press_interval=2))
+                asyncio.create_task(on_temp_toggle(key_press_interval=config['temp_switch_interval']))
             elif hotkey_id == 3:
-                asyncio.create_task(on_temp_toggle_en_cn(key_press_interval=0.3))
+                asyncio.create_task(on_temp_toggle(key_press_interval=config['instant_switch_interval']))
             elif hotkey_id == 4:
                 on_switch_english()
             elif hotkey_id == 5:
-                on_switch_chinese()
+                on_switch_secondary()
         return win32gui.DefWindowProc(hwnd, msg, wparam, lparam)
 
     async def listen_hotkey(self):
         self.hwnd = self.create_window()
 
-        VK_LBRACKET = 0xDB
-        VK_RBRACKET = 0xDD
-        VK_BACKSLASH = 0xDC
-
         # Register multiple global hotkeys
         hotkeys = [
-            (1, win32con.MOD_CONTROL, VK_BACKSLASH),
-            (2, win32con.MOD_CONTROL | win32con.MOD_SHIFT, VK_BACKSLASH),
-            (3, win32con.MOD_CONTROL | win32con.MOD_ALT, VK_BACKSLASH),
-            # (4, win32con.MOD_CONTROL | win32con.MOD_ALT, VK_LBRACKET),
-            # (5, win32con.MOD_CONTROL | win32con.MOD_ALT, VK_RBRACKET),
-
-            # Add more hotkeys here
+            (1, 'toggle'),
+            (2, 'temp_toggle'),
+            (3, 'instant_toggle'),
+            (4, 'english'),
+            (5, 'secondary'),
         ]
 
         registered_hotkeys = []
-        for id, modifiers, vk in hotkeys:
+        for id, target in hotkeys:
+            hotkey = config['hotkeys'].get(target)
+            if hotkey is None:
+                continue
+
+            modifiers, vk = parse_shortcut(hotkey)
+            if vk is None:
+                continue
+
             if self.register_hotkey(self.hwnd, id, modifiers, vk):
-                logger.info(f"Global hotkey registered: ID {id}")
+                logger.info(f"Global hotkey registered: ID {id}, hotkey {hotkey}, target {target}")
                 registered_hotkeys.append(id)
             else:
-                logger.info(f"Failed to register global hotkey: ID {id}")
+                logger.info(f"Failed to register global hotkey: ID {id}, hotkey {hotkey}, target {target}")
 
         # Message loop
         while True:

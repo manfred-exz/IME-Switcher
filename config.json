@@ -1,0 +1,10 @@
+{
+  "temp_switch_interval": 2.0,
+  "instant_switch_interval": 0.6,
+  "secondary_keyboard_id": "00000804",
+  "hotkeys": {
+    "toggle": "Ctrl+\\",
+    "temp_toggle": "Ctrl+Shift+\\",
+    "instant_toggle": "Ctrl+Alt+\\"
+  }
+}
