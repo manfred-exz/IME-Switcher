@@ -1,3 +1,14 @@
-/ime_switcher.dist/
-/ime_switcher.build/
 .idea/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pyw
+*.pyz
+*.pywz
+*.pyzw
+*.pyzwz
+
+*.dist/
+*.build/
+logs/

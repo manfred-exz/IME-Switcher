@@ -4,6 +4,7 @@ import ctypes
 import json
 import logging
 import os
+import sys
 import time
 from ctypes import wintypes
 
@@ -14,6 +15,14 @@ import win32process
 from infi.systray import SysTrayIcon
 
 from ime_switcher.shortcut import parse_shortcut
+from ime_status_detector import (
+    get_ime_status, 
+    switch_to_chinese_mode, 
+    get_window_title,
+)
+
+logger_temp = logging.getLogger('ime_switcher')
+logger_temp.info("Successfully imported ime_status_detector module")
 
 IMC_GETOPENSTATUS = 0x0005
 IMC_SETOPENSTATUS = 0x0006
@@ -63,6 +72,8 @@ else:
         "temp_switch_interval": 2.0,
         "instant_switch_interval": 0.6,
         "secondary_keyboard_id": "00000804",
+        "force_cn_mode": True,  # 添加自动切换开关
+        "auto_switch_interval": 0.2,  # 自动切换检查间隔
         "hotkeys": {
             "toggle": "Ctrl+\\",
             "temp_toggle": "Ctrl+Shift+\\",
@@ -75,17 +86,6 @@ english_keyboard_id = f'0000{english_lang_id}'
 secondary_keyboard_id = config['secondary_keyboard_id']
 assert len(secondary_keyboard_id) == 8
 secondary_lang_id = secondary_keyboard_id[4:8]
-
-
-def get_window_text(hwnd):
-    # 定义缓冲区大小
-    length = user32.GetWindowTextLengthW(hwnd) + 1
-    buf = ctypes.create_unicode_buffer(length)
-
-    # 调用GetWindowTextW获取窗口标题
-    user32.GetWindowTextW(hwnd, buf, length)
-
-    return buf.value
 
 
 def get_window_langid(hwnd):
@@ -123,7 +123,7 @@ def set_input_language_for_window(hwnd, keyboard_layout_id: str):
 
 def on_toggle():
     hwnd = get_front_window()
-    title = get_window_text(hwnd) or '[Unknown]'
+    title = get_window_title(hwnd) or '[Unknown]'
     lang_id = get_window_langid(hwnd)
     if lang_id == secondary_lang_id:
         set_input_language_for_window(hwnd, english_keyboard_id)
@@ -135,14 +135,14 @@ def on_toggle():
 
 def on_switch_english():
     hwnd = get_front_window()
-    title = get_window_text(hwnd) or '[Unknown]'
+    title = get_window_title(hwnd) or '[Unknown]'
     set_input_language_for_window(hwnd, english_keyboard_id)
     logger.info(f'{title}: switched to ENGLISH')
 
 
 def on_switch_secondary():
     hwnd = get_front_window()
-    title = get_window_text(hwnd) or '[Unknown]'
+    title = get_window_title(hwnd) or '[Unknown]'
     set_input_language_for_window(hwnd, secondary_keyboard_id)
     logger.info(f'{title}: switched to secondary keyboard')
 
@@ -180,15 +180,72 @@ async def on_temp_toggle(key_press_interval: float):
         last_key_press_time = None
         while True:
             await asyncio.sleep(0.1)
-            logger.info('checking...')
+            logger.debug('checking key activity...')
             if last_key_press_time and time.time() - last_key_press_time > key_press_interval:
                 break
         on_toggle()
 
 
-class HotKeyTrigger:
-    # HOTKEY
+async def force_cn_monitor():
+    """
+    自动切换监控任务：当检测到Microsoft Pinyin输入法且为英文模式时，自动切换到中文模式
+    """
+    if not config.get('force_cn_mode', True):
+        logger.info("Auto switch is disabled in config")
+        return
+    
+    logger.info("Auto switch monitor started")
+    interval = config.get('auto_switch_interval', 0.2)
+    last_status = None
+    
+    try:
+        while True:
+            try:
+                # 获取当前IME状态
+                is_chinese, symbol_mode, lang_id, is_pinyin, hwnd = get_ime_status()
+                
+                # 检查是否需要自动切换
+                if is_pinyin and not is_chinese:
+                    current_status = (is_pinyin, is_chinese, hwnd)
+                    
+                    # 避免频繁切换，只在状态变化时执行
+                    if current_status != last_status:
+                        window_title = get_window_title(hwnd)
+                        logger.info("Auto switch triggered: Microsoft Pinyin detected in English mode")
+                        logger.info(f"Window: {window_title}")
+                        
+                        # 执行自动切换
+                        success = switch_to_chinese_mode(hwnd)
+                        if success:
+                            logger.info("✅ Auto switched to Chinese mode successfully")
+                        else:
+                            logger.warning("❌ Auto switch failed")
+                        
+                        last_status = current_status
+                
+                # 如果状态变化但不需要切换，也更新last_status
+                current_status = (is_pinyin, is_chinese, hwnd)
+                if current_status != last_status:
+                    last_status = current_status
+                
+            except Exception as e:
+                logger.error(f"Error in auto switch monitor: {e}")
+                await asyncio.sleep(interval * 2)  # 出错时等待更长时间
+                continue
+            
+            await asyncio.sleep(interval)
+            
+    except asyncio.CancelledError:
+        logger.info("Auto switch monitor cancelled")
+        raise
+    except Exception as e:
+        logger.error(f"Auto switch monitor error: {e}")
 
+
+class HotKeyTrigger:
+    def __init__(self):
+        self.force_cn = None
+    
     def register_hotkey(self, hwnd, id, modifiers, vk):
         prototype = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HWND, ctypes.c_int, ctypes.c_uint, ctypes.c_uint)
         paramflags = (1, "hWnd", 0), (1, "id", 0), (1, "fsModifiers", 0), (1, "vk", 0)
@@ -260,28 +317,100 @@ class HotKeyTrigger:
             await asyncio.sleep(0.05)
             win32gui.PumpWaitingMessages()
 
-        # # Unregister all hotkeys when done
-        # for id in registered_hotkeys:
-        #     self.unregister_hotkey(hwnd, id)
-
     async def do_key_check(self):
         while True:
             for vk in range(256):
                 if win32api.GetAsyncKeyState(vk) & 0x0001:  # Key was pressed since last call
-                    logger.info('key pressed')
+                    logger.info(f'key pressed: {vk}')
                     global last_key_press_time
                     last_key_press_time = time.time()
                     break
             await asyncio.sleep(0.05)
 
+    async def cleanup(self):
+        """清理资源"""
+        if self.force_cn and not self.force_cn.done():
+            self.force_cn.cancel()
+            try:
+                await self.force_cn
+            except asyncio.CancelledError:
+                pass
+            logger.info("Auto switch task cancelled")
+
+
+def create_systray_menu():
+    """创建系统托盘菜单"""
+    menu_options = (
+        ("Toggle Force CN Mode", None, toggle_force_cn_mode),
+        ("Status", None, show_status),
+    )
+    return menu_options
+
+
+def toggle_force_cn_mode(_):
+    """切换自动切换功能"""
+    global trigger
+    current_state = config.get('force_cn_mode', True)
+    config['force_cn_mode'] = not current_state
+    
+    if config['force_cn_mode']:
+        logger.info("Auto switch enabled")
+        # 重启自动切换任务
+        if hasattr(trigger, 'auto_switch_task'):
+            if trigger.force_cn is None or trigger.force_cn.done():
+                trigger.force_cn = asyncio.create_task(force_cn_monitor())
+    else:
+        logger.info("Auto switch disabled")
+        # 停止自动切换任务
+        if hasattr(trigger, 'auto_switch_task') and trigger.force_cn:
+            trigger.force_cn.cancel()
+
+
+def show_status(_):
+    """显示当前状态"""
+    try:
+        is_chinese, symbol_mode, lang_id, is_pinyin, hwnd = get_ime_status()
+        window_title = get_window_title(hwnd)
+        logger.info("Current Status:")
+        logger.info(f"  Window: {window_title}")
+        logger.info(f"  Language ID: 0x{lang_id:04x}")
+        logger.info(f"  Microsoft Pinyin: {is_pinyin}")
+        logger.info(f"  Chinese Mode: {is_chinese}")
+        logger.info(f"  Symbol Mode: {symbol_mode}")
+        logger.info(f"  Force CN Mode: {config.get('force_cn_mode', True)}")
+    except Exception as e:
+        logger.error(f"Error getting status: {e}")
+
 
 if __name__ == '__main__':
     trigger = HotKeyTrigger()
-    systray = SysTrayIcon("icon.ico", "IME Switcher",
+    
+    # 创建系统托盘
+    menu_options = create_systray_menu()
+    systray = SysTrayIcon("icon.ico", "IME Switcher", 
+                          menu_options=menu_options,
                           on_quit=lambda _: os._exit(1))
     systray.start()
+    
+    # 启动异步任务
     loop = asyncio.get_event_loop()
-    loop.create_task(trigger.do_key_check())
-    loop.create_task(trigger.listen_hotkey())
-    loop.run_forever()
-    systray.shutdown()
+    
+    try:
+        loop.create_task(trigger.do_key_check())
+        loop.create_task(trigger.listen_hotkey())
+
+        # 启动自动切换监控任务
+        if config.get('force_cn_mode', True):
+            trigger.force_cn = loop.create_task(force_cn_monitor())
+            logger.info("Force CN monitor task started")
+        
+        logger.info("IME Switcher started")
+        loop.run_forever()
+        
+    except KeyboardInterrupt:
+        logger.info("Shutting down...")
+    finally:
+        # 清理资源
+        loop.run_until_complete(trigger.cleanup())
+        systray.shutdown()
+        loop.close()

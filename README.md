@@ -4,6 +4,7 @@
 
 功能：
 - 切换 `<ctrl>+\`
+- 强制中文模式（禁止微软拼音输入法的ASCII模式）
 - 暂时切换 `<ctrl>+<shfit>+\` (停止输入2s后自动切回)
 - 快速切换 `<ctrl>+<alt>+\` (停止输入0.3s后自动切回)
 
@@ -23,5 +24,5 @@ https://github.com/manfred-exz/IME-Switcher/releases/latest
 ## Build
 
 ```
-python -m nuitka --standalone --windows-disable-console .\main.py
+python -m nuitka --standalone --windows-console-mode=disable --windows-icon-from-ico .\icon.ico .\ime_switcher\main.py
 ```
