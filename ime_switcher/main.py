@@ -4,7 +4,6 @@ import ctypes
 import json
 import logging
 import os
-import sys
 import time
 from ctypes import wintypes
 
@@ -60,10 +59,10 @@ def setup_logger():
 logger = setup_logger()
 
 root_dir = os.path.abspath(os.path.dirname(__file__))
-config_path = os.path.join(root_dir, '../config.json')
+config_path = os.path.join(root_dir, './config.json')
 
 if os.path.exists(config_path):
-    with open(os.path.join(root_dir, '../config.json')) as f:
+    with open(config_path) as f:
         config = json.load(f)
     logger.info(f'Loaded config from {config_path}')
     logger.info(f'Config: {config}')
@@ -73,7 +72,7 @@ else:
         "instant_switch_interval": 0.6,
         "secondary_keyboard_id": "00000804",
         "force_cn_mode": True,  # 添加自动切换开关
-        "auto_switch_interval": 0.2,  # 自动切换检查间隔
+        "force_cn_interval": 0.2,  # 自动切换检查间隔
         "hotkeys": {
             "toggle": "Ctrl+\\",
             "temp_toggle": "Ctrl+Shift+\\",
@@ -191,11 +190,11 @@ async def force_cn_monitor():
     自动切换监控任务：当检测到Microsoft Pinyin输入法且为英文模式时，自动切换到中文模式
     """
     if not config.get('force_cn_mode', True):
-        logger.info("Auto switch is disabled in config")
+        logger.info("Force CN mode is disabled in config")
         return
     
-    logger.info("Auto switch monitor started")
-    interval = config.get('auto_switch_interval', 0.2)
+    logger.info("Force CN mode monitor started")
+    interval = config.get('force_cn_interval', 0.2)
     last_status = None
     
     try:
@@ -211,7 +210,7 @@ async def force_cn_monitor():
                     # 避免频繁切换，只在状态变化时执行
                     if current_status != last_status:
                         window_title = get_window_title(hwnd)
-                        logger.info("Auto switch triggered: Microsoft Pinyin detected in English mode")
+                        logger.info("Force CN triggered: Microsoft Pinyin detected in English mode")
                         logger.info(f"Window: {window_title}")
                         
                         # 执行自动切换
@@ -219,7 +218,7 @@ async def force_cn_monitor():
                         if success:
                             logger.info("✅ Auto switched to Chinese mode successfully")
                         else:
-                            logger.warning("❌ Auto switch failed")
+                            logger.warning("❌ Force CN failed")
                         
                         last_status = current_status
                 
@@ -229,22 +228,22 @@ async def force_cn_monitor():
                     last_status = current_status
                 
             except Exception as e:
-                logger.error(f"Error in auto switch monitor: {e}")
+                logger.error(f"Error in force CN monitor: {e}")
                 await asyncio.sleep(interval * 2)  # 出错时等待更长时间
                 continue
             
             await asyncio.sleep(interval)
             
     except asyncio.CancelledError:
-        logger.info("Auto switch monitor cancelled")
+        logger.info("Force CN mode monitor cancelled")
         raise
     except Exception as e:
-        logger.error(f"Auto switch monitor error: {e}")
+        logger.error(f"Force CN mode monitor error: {e}")
 
 
 class HotKeyTrigger:
     def __init__(self):
-        self.force_cn = None
+        self.force_cn_task = None
     
     def register_hotkey(self, hwnd, id, modifiers, vk):
         prototype = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HWND, ctypes.c_int, ctypes.c_uint, ctypes.c_uint)
@@ -329,13 +328,13 @@ class HotKeyTrigger:
 
     async def cleanup(self):
         """清理资源"""
-        if self.force_cn and not self.force_cn.done():
-            self.force_cn.cancel()
+        if self.force_cn_task and not self.force_cn_task.done():
+            self.force_cn_task.cancel()
             try:
-                await self.force_cn
+                await self.force_cn_task
             except asyncio.CancelledError:
                 pass
-            logger.info("Auto switch task cancelled")
+            logger.info("Force CN mode task cancelled")
 
 
 def create_systray_menu():
@@ -354,16 +353,15 @@ def toggle_force_cn_mode(_):
     config['force_cn_mode'] = not current_state
     
     if config['force_cn_mode']:
-        logger.info("Auto switch enabled")
+        logger.info("Force CN mode enabled")
         # 重启自动切换任务
-        if hasattr(trigger, 'auto_switch_task'):
-            if trigger.force_cn is None or trigger.force_cn.done():
-                trigger.force_cn = asyncio.create_task(force_cn_monitor())
+        if trigger.force_cn_task is None or trigger.force_cn_task.done():
+            trigger.force_cn_task = loop.create_task(force_cn_monitor())
     else:
-        logger.info("Auto switch disabled")
+        logger.info("Force CN mode disabled")
         # 停止自动切换任务
-        if hasattr(trigger, 'auto_switch_task') and trigger.force_cn:
-            trigger.force_cn.cancel()
+        if trigger.force_cn_task:
+            trigger.force_cn_task.cancel()
 
 
 def show_status(_):
@@ -393,15 +391,15 @@ if __name__ == '__main__':
     systray.start()
     
     # 启动异步任务
-    loop = asyncio.get_event_loop()
+    loop = asyncio.new_event_loop()
     
     try:
         loop.create_task(trigger.do_key_check())
         loop.create_task(trigger.listen_hotkey())
 
         # 启动自动切换监控任务
-        if config.get('force_cn_mode', True):
-            trigger.force_cn = loop.create_task(force_cn_monitor())
+        if config.get('force_cn_mode', False):
+            trigger.force_cn_task = loop.create_task(force_cn_monitor())
             logger.info("Force CN monitor task started")
         
         logger.info("IME Switcher started")
