@@ -24,5 +24,5 @@ https://github.com/manfred-exz/IME-Switcher/releases/latest
 ## Build
 
 ```
-python -m nuitka --standalone --windows-console-mode=disable --windows-icon-from-ico .\icon.ico .\ime_switcher\main.py
+python -m nuitka --standalone --windows-console-mode=disable --windows-icon-from-ico=.\icon.ico .\ime_switcher\main.py
 ```
